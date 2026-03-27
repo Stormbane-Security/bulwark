@@ -3,7 +3,10 @@ package audit
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"os"
+	"sync"
 	"time"
 )
 
@@ -29,7 +32,8 @@ type Event struct {
 	Decision   *Decision `json:"decision,omitempty"`
 	Error      *string   `json:"error,omitempty"`
 
-	// Latency is used to populate LatencyMS before emit; not serialized directly.
+	// Latency is set by callers using Go duration types; Emit converts it to
+	// LatencyMS for serialization. Not included in JSON output.
 	Latency time.Duration `json:"-"`
 }
 
@@ -39,24 +43,31 @@ type Logger interface {
 }
 
 // JSONLogger writes one JSON object per line to an io.Writer.
+// It is safe for concurrent use.
 type JSONLogger struct {
-	w   io.Writer
+	mu  sync.Mutex
 	enc *json.Encoder
 }
 
 // NewJSONLogger returns a Logger that writes newline-delimited JSON to w.
 func NewJSONLogger(w io.Writer) *JSONLogger {
 	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	return &JSONLogger{w: w, enc: enc}
+	enc.SetEscapeHTML(false) // preserve URLs and other values without mangling < > &
+	return &JSONLogger{enc: enc}
 }
 
 // Emit serializes the event as a single JSON line.
-// LatencyMS is derived from Latency if not already set.
+// If Latency is set and LatencyMS is zero, LatencyMS is derived from Latency.
+// Write errors are reported to stderr rather than propagated — a logger failure
+// must not crash the gateway or affect the request path.
 func (l *JSONLogger) Emit(event Event) {
 	if event.LatencyMS == 0 && event.Latency > 0 {
 		event.LatencyMS = event.Latency.Milliseconds()
 	}
-	// best-effort: ignore encode errors (writer may be closed on shutdown)
-	_ = l.enc.Encode(event)
+	l.mu.Lock()
+	err := l.enc.Encode(event)
+	l.mu.Unlock()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bulwark: audit log write error: %v\n", err)
+	}
 }

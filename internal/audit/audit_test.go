@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -114,6 +115,56 @@ func TestJSONAuditLogger_DeniedDecision(t *testing.T) {
 	if decision["reason"] != reason {
 		t.Errorf("unexpected reason: %v", decision["reason"])
 	}
+}
+
+func TestJSONAuditLogger_ConcurrentEmit(t *testing.T) {
+	var buf syncBuffer
+	logger := audit.NewJSONLogger(&buf)
+
+	const n = 100
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			logger.Emit(audit.Event{
+				RequestID:  fmt.Sprintf("req-%d", i),
+				Timestamp:  time.Now(),
+				StatusCode: 200,
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	lines := bytes.Split(bytes.TrimRight(buf.Bytes(), "\n"), []byte("\n"))
+	if len(lines) != n {
+		t.Errorf("expected %d lines, got %d", n, len(lines))
+	}
+	for i, line := range lines {
+		var obj map[string]any
+		if err := json.Unmarshal(line, &obj); err != nil {
+			t.Errorf("line %d is not valid JSON: %v", i, err)
+		}
+	}
+}
+
+// syncBuffer is a bytes.Buffer that is safe for concurrent reads after all
+// writes are done (used only to capture output in tests).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Bytes()
 }
 
 func TestJSONAuditLogger_ErrorField(t *testing.T) {

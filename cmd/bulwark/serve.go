@@ -45,8 +45,10 @@ func serve(cfg *config.Config) error {
 		return fmt.Errorf("no listeners configured")
 	}
 
-	// Phase 0: single listener, stub handler returning 501.
-	// Full pipeline wired in Phase 1.
+	// Phase 0: single listener only. Full pipeline wired in Phase 1.
+	if len(cfg.Listeners) > 1 {
+		fmt.Fprintf(os.Stderr, "bulwark: warning: %d listeners configured, only the first will be started in this build\n", len(cfg.Listeners))
+	}
 	l := cfg.Listeners[0]
 
 	mux := http.NewServeMux()
