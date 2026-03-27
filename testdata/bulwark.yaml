@@ -1,0 +1,39 @@
+# Bulwark sample configuration
+# Run a simple echo upstream:
+#   while true; do nc -l 9090; done
+# or use: python3 -m http.server 9090
+#
+# Then: make run   (starts bulwark on :8080)
+#       curl -v http://localhost:8080/   (expect 501 in Phase 0)
+
+listeners:
+  - addr: ":8080"
+    # TLS (Phase 7):
+    # tls:
+    #   cert: testdata/certs/server.crt
+    #   key:  testdata/certs/server.key
+    # mtls:
+    #   enabled: true
+    #   ca_bundle: testdata/certs/client-ca.pem
+
+routes:
+  - id: echo-service
+    match:
+      host: localhost:8080
+      path_prefix: /
+    upstream:
+      url: http://localhost:9090
+      auth:
+        type: bulwark_jwt   # Bulwark mints a signed JWT for the upstream (Phase 5)
+    authn:
+      required: false       # No authn in Phase 0; enable in Phase 2
+      # issuers:
+      #   - type: oidc
+      #     issuer: https://auth.example.com
+      #     audience: localhost
+      #     jwks_uri: https://auth.example.com/.well-known/jwks.json
+    # policy: echo-policy   # Uncomment when policy defined (Phase 4)
+
+# policies:
+#   - id: echo-policy
+#     rego_path: policy/echo.rego
