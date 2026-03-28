@@ -1,6 +1,33 @@
+# Build outputs
 /bulwark
 /testapi
 dist/
+
+# Test artifacts
 *.test
 *.out
+coverage.out
+coverage.html
+
+# Generated certs (created by test helpers)
 testdata/certs/
+
+# Dependency vendoring (not used, but ignore if added)
+vendor/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
