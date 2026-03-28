@@ -12,34 +12,60 @@ env:
   IMAGE_TESTAPI: ghcr.io/stormbane-security/bulwark-testapi
 
 jobs:
+  # ── Go quality + security checks ─────────────────────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          cache: true
 
-      - name: Run tests
-        run: go test ./...
+      - name: go vet
+        run: go vet ./...
 
+      - name: go test (race detector)
+        run: go test -race -count=1 ./...
+
+      # Runs govet, errcheck, staticcheck, gosec, bodyclose, misspell, noctx,
+      # exhaustive, nilerr, errorlint, and more — config in .golangci.yml.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+        with:
+          version: v2
+
+      # govulncheck queries the Go vulnerability database for known CVEs in
+      # direct and transitive dependencies. Kept separate from golangci-lint
+      # because it uses the authoritative govulndb, not a static ruleset.
+      - name: govulncheck
+        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1.0.4
+        with:
+          go-version-file: go.mod
+          go-package: ./...
+          repo-checkout: false
+
+  # ── Container build, push, and image scanning ─────────────────────────────────
   build:
     name: Build & Push
     runs-on: ubuntu-latest
     needs: test
-    # Only push images on pushes to main or dev; PRs only build (no push).
     permissions:
       contents: read
       packages: write
+      security-events: write
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log in to GitHub Packages
         if: github.event_name == 'push'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -47,7 +73,7 @@ jobs:
 
       - name: Extract metadata — bulwark
         id: meta-bulwark
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE_BULWARK }}
           tags: |
@@ -57,7 +83,7 @@ jobs:
 
       - name: Extract metadata — testapi
         id: meta-testapi
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE_TESTAPI }}
           tags: |
@@ -65,20 +91,58 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
+      # load: true makes the image available to the local Docker daemon so
+      # Trivy can scan it without pulling from the registry. On push events
+      # the image is also pushed to ghcr.io at the same time.
       - name: Build & push — bulwark
-        uses: docker/build-push-action@v6
+        id: build-bulwark
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile
+          load: true
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta-bulwark.outputs.tags }}
           labels: ${{ steps.meta-bulwark.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push — testapi
-        uses: docker/build-push-action@v6
+        id: build-testapi
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile.testapi
+          load: true
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta-testapi.outputs.tags }}
           labels: ${{ steps.meta-testapi.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Trivy container image scanning ──────────────────────────────────────
+      # SECURITY NOTICE: aquasecurity/trivy-action was compromised 2026-03-19.
+      # (GHSA-69fq-xp46-6x23) — attackers force-pushed 76/77 version tags to
+      # malicious commits. This workflow is pinned to commit 57a97c7 (v0.35.0),
+      # the last SHA confirmed safe prior to the compromise.
+      #
+      # DO NOT update this action by tag. Before bumping the SHA, verify the
+      # target commit against the security advisory:
+      # https://github.com/aquasecurity/trivy/security/advisories/GHSA-69fq-xp46-6x23
+      - name: Trivy scan — bulwark
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 PRE-ATTACK SAFE
+        with:
+          image-ref: ${{ steps.build-bulwark.outputs.imageid }}
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Trivy scan — testapi
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 PRE-ATTACK SAFE
+        with:
+          image-ref: ${{ steps.build-testapi.outputs.imageid }}
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
