@@ -12,14 +12,10 @@ linters:
     - nilerr       # return nil instead of err
     - errorlint    # errors.Is/As usage
 
-linters-settings:
-  gosec:
-    excludes:
-      - G115 # integer overflow on conversion — too noisy for this codebase
-
-  exhaustive:
-    default-signifies-exhaustive: true
-
-issues:
-  max-issues-per-linter: 0
-  max-same-issues: 0
+  # In v2 linter settings are nested here, not at the top level.
+  settings:
+    gosec:
+      excludes:
+        - G115 # integer overflow on conversion — too noisy for this codebase
+    exhaustive:
+      default-signifies-exhaustive: true
