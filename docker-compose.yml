@@ -3,11 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["serve", "--config", "/etc/bulwark/bulwark.yaml"]
     ports:
       - "8080:8080"
-    volumes:
-      - ./testdata/docker-bulwark.yaml:/etc/bulwark/bulwark.yaml:ro
     depends_on:
       - testapi
 

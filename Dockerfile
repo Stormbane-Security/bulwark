@@ -11,7 +11,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /out/bulwark /bulwark
+# Bake in a default dev config so the image works out-of-the-box in
+# docker compose without any volume mount or configs.content support.
+# Override at runtime with: -v ./your.yaml:/etc/bulwark/bulwark.yaml:ro
+COPY testdata/docker-bulwark.yaml /etc/bulwark/bulwark.yaml
 
 EXPOSE 8080
 ENTRYPOINT ["/bulwark"]
-CMD ["serve"]
+CMD ["serve", "--config", "/etc/bulwark/bulwark.yaml"]
