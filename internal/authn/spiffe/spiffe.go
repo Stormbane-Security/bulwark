@@ -36,8 +36,12 @@ func New(issuer, audience, jwksURI, trustDomain string, score int, cache *jwk.Ca
 	if jwksURI == "" {
 		return nil, fmt.Errorf("spiffe: jwks_uri is required")
 	}
-	if _, err := url.Parse(jwksURI); err != nil {
+	u, err := url.Parse(jwksURI)
+	if err != nil {
 		return nil, fmt.Errorf("spiffe: invalid jwks_uri %q: %w", jwksURI, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("spiffe: jwks_uri must use http or https scheme, got %q", u.Scheme)
 	}
 	return &Validator{
 		issuer:      issuer,

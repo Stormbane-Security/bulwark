@@ -34,8 +34,12 @@ func New(issuer, audience, jwksURI string, score int, cache *jwk.Cache, principa
 	if jwksURI == "" {
 		return nil, fmt.Errorf("oidc: jwks_uri is required")
 	}
-	if _, err := url.Parse(jwksURI); err != nil {
+	u, err := url.Parse(jwksURI)
+	if err != nil {
 		return nil, fmt.Errorf("oidc: invalid jwks_uri %q: %w", jwksURI, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("oidc: jwks_uri must use http or https scheme, got %q", u.Scheme)
 	}
 	return &Validator{
 		issuer:          issuer,
@@ -53,9 +57,6 @@ func (v *Validator) Register() error {
 	return v.cache.Register(v.jwksURI)
 }
 
-// Authenticate validates the Bearer JWT in the Authorization header.
-// Returns ErrNotApplicable if no Bearer token is present.
-// Returns a non-nil error (causing 401) if the token is present but invalid.
 // Authenticate validates the Bearer JWT in the Authorization header.
 // Returns ErrNotApplicable if no Bearer token is present.
 // Returns a non-nil error (causing 401) if the token is present but invalid.
@@ -87,6 +88,13 @@ func (v *Validator) Authenticate(req *http.Request) (*identity.VerifiedIdentity,
 	token, err := jwt.Parse([]byte(raw), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("oidc: invalid token: %w", err)
+	}
+
+	// Require an expiry. jwt.WithValidate(true) checks exp if present but does
+	// not require it — a token with no exp is a permanent credential. We reject
+	// it explicitly so every accepted token has a bounded lifetime.
+	if token.Expiration().IsZero() {
+		return nil, fmt.Errorf("oidc: token missing required exp claim")
 	}
 
 	sub := token.Subject()

@@ -388,3 +388,17 @@ func TestNew_MissingJWKSUriReturnsError(t *testing.T) {
 		t.Error("expected error for missing jwks_uri")
 	}
 }
+
+func TestNew_NonHTTPJWKSUriReturnsError(t *testing.T) {
+	// file:// or other non-HTTP URIs must be rejected at construction time.
+	cache := jwk.NewCache(t.Context())
+	for _, uri := range []string{
+		"file:///etc/spire/jwks.json",
+		"ftp://spire.example.com/jwks.json",
+	} {
+		_, err := authnspiffe.New(testIssuer, testAudience, uri, "", 25, cache)
+		if err == nil {
+			t.Errorf("expected error for non-http jwks_uri %q", uri)
+		}
+	}
+}

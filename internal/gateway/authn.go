@@ -31,6 +31,15 @@ func BuildAuthn(cfg *config.Config, cache *jwk.Cache) (map[string]authn.Authenti
 
 	for _, route := range cfg.Routes {
 		if len(route.Authn.Trust) == 0 {
+			// A required route with Issuers but no Trust entries has no authenticators
+			// wired — the handler would silently skip auth, a security hole. Fail at
+			// startup so the operator sees a clear error rather than an open route.
+			if route.Authn.Required && len(route.Authn.Issuers) > 0 {
+				return nil, fmt.Errorf(
+					"gateway: route %q: authn.required=true but authn.issuers is not wired to authenticators; use authn.trust with defined trust_anchors instead",
+					route.ID,
+				)
+			}
 			continue
 		}
 
@@ -60,7 +69,7 @@ func buildAuthenticator(anchor *config.TrustAnchorConfig, cache *jwk.Cache) (aut
 	switch anchor.Type {
 	case "oidc":
 		if score == 0 {
-			score = identity.DefaultScores[identity.EvidenceJWT]
+			score, _ = identity.DefaultScore(identity.EvidenceJWT)
 		}
 		v, err := authnoidc.New(anchor.Issuer, anchor.Audience, anchor.JWKSUri, score, cache, anchor.PrincipalPrefix)
 		if err != nil {
@@ -73,7 +82,7 @@ func buildAuthenticator(anchor *config.TrustAnchorConfig, cache *jwk.Cache) (aut
 
 	case "spiffe_jwt":
 		if score == 0 {
-			score = identity.DefaultScores[identity.EvidenceSPIFFEJWT]
+			score, _ = identity.DefaultScore(identity.EvidenceSPIFFEJWT)
 		}
 		v, err := authnspiffe.New(anchor.Issuer, anchor.Audience, anchor.JWKSUri, anchor.SpiffeTrustDomain, score, cache)
 		if err != nil {

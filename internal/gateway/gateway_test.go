@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/lestrrat-go/jwx/v2/jwk"
+
 	"github.com/stormbane-security/bulwark/internal/audit"
 	"github.com/stormbane-security/bulwark/internal/authn"
 	"github.com/stormbane-security/bulwark/internal/config"
@@ -545,4 +547,151 @@ type captureLogger struct {
 
 func (l *captureLogger) Emit(e audit.Event) {
 	*l.events = append(*l.events, e)
+}
+
+// ── path traversal normalization ──────────────────────────────────────────────
+
+func TestHandler_PathTraversal_RoutesToNormalizedRoute(t *testing.T) {
+	// Without path normalization, /public/../admin resolves to /admin on the
+	// upstream while matching the /public (no-auth) route at the gateway —
+	// bypassing the auth requirement on the /admin route entirely.
+	adminUpstream := newTestUpstream(http.StatusOK, "admin")
+	defer adminUpstream.Close()
+	publicUpstream := newTestUpstream(http.StatusOK, "public")
+	defer publicUpstream.Close()
+
+	cfg := newTestConfig([]config.RouteConfig{
+		{
+			ID:       "admin",
+			Match:    config.MatchConfig{Host: "api.internal", PathPrefix: "/admin"},
+			Upstream: config.UpstreamConfig{URL: adminUpstream.URL},
+			Authn:    config.AuthnConfig{Required: true},
+		},
+		{
+			ID:       "public",
+			Match:    config.MatchConfig{Host: "api.internal", PathPrefix: "/public"},
+			Upstream: config.UpstreamConfig{URL: publicUpstream.URL},
+			Authn:    config.AuthnConfig{Required: false},
+		},
+	})
+	// Admin route requires auth; the stub always errors → 401 if it matches.
+	auth := map[string]authn.Authenticator{
+		"admin": &stubAuth{err: errors.New("no credentials")},
+	}
+	h, err := gateway.NewHandler(cfg, auth, silentAudit())
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet,
+		"http://api.internal/public/../admin/settings", nil)
+	h.ServeHTTP(rec, req)
+
+	// After normalization /public/../admin/settings → /admin/settings,
+	// which matches the auth-required admin route → 401.
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("path traversal bypassed auth: expected 401, got %d", rec.Code)
+	}
+}
+
+func TestHandler_PathTraversal_NormalizedPathForwardedToUpstream(t *testing.T) {
+	upstream := newTestUpstream(http.StatusOK, "ok")
+	defer upstream.Close()
+
+	cfg := newTestConfig([]config.RouteConfig{
+		{
+			ID:       "r1",
+			Match:    config.MatchConfig{Host: "api.internal", PathPrefix: "/"},
+			Upstream: config.UpstreamConfig{URL: upstream.URL},
+			Authn:    config.AuthnConfig{Required: false},
+		},
+	})
+	h, err := gateway.NewHandler(cfg, nil, silentAudit())
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet,
+		"http://api.internal/api/../secret", nil)
+	h.ServeHTTP(rec, req)
+
+	if upstream.lastReq == nil {
+		t.Fatal("upstream did not receive request")
+	}
+	if upstream.lastReq.URL.Path != "/secret" {
+		t.Errorf("upstream received unnormalized path %q, want /secret", upstream.lastReq.URL.Path)
+	}
+}
+
+// ── audit: auth failure detail ────────────────────────────────────────────────
+
+func TestHandler_AuthFailure_ErrorDetailInAuditLog(t *testing.T) {
+	upstream := newTestUpstream(http.StatusOK, "ok")
+	defer upstream.Close()
+
+	var captured []audit.Event
+	logger := &captureLogger{events: &captured}
+
+	cfg := newTestConfig([]config.RouteConfig{
+		{
+			ID:       "r1",
+			Match:    config.MatchConfig{Host: "api.internal", PathPrefix: "/"},
+			Upstream: config.UpstreamConfig{URL: upstream.URL},
+			Authn:    config.AuthnConfig{Required: true},
+		},
+	})
+	auth := map[string]authn.Authenticator{
+		"r1": &stubAuth{err: errors.New("token expired")},
+	}
+	h, err := gateway.NewHandler(cfg, auth, logger)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+	if len(captured) != 1 {
+		t.Fatalf("expected 1 audit event, got %d", len(captured))
+	}
+	ev := captured[0]
+	if ev.Error == nil {
+		t.Fatal("expected auth error detail in audit event, got nil")
+	}
+	if *ev.Error != "token expired" {
+		t.Errorf("audit error: got %q, want %q", *ev.Error, "token expired")
+	}
+}
+
+// ── BuildAuthn: fail-closed for misconfigured required routes ─────────────────
+
+func TestBuildAuthn_RequiredRouteWithIssuersButNoTrust_ReturnsError(t *testing.T) {
+	// A route with authn.required=true and only old-style authn.issuers (no
+	// authn.trust) has no authenticators wired. BuildAuthn must fail at startup
+	// rather than silently bypassing auth at request time.
+	cache := jwk.NewCache(t.Context())
+	cfg := &config.Config{
+		Listeners: []config.ListenerConfig{{Addr: ":0"}},
+		Routes: []config.RouteConfig{
+			{
+				ID:    "api",
+				Match: config.MatchConfig{Host: "api.internal", PathPrefix: "/"},
+				Upstream: config.UpstreamConfig{URL: "http://upstream:8080"},
+				Authn: config.AuthnConfig{
+					Required: true,
+					Issuers:  []config.IssuerConfig{{Type: "oidc"}}, // old style, not wired
+				},
+			},
+		},
+	}
+	_, err := gateway.BuildAuthn(cfg, cache)
+	if err == nil {
+		t.Error("expected error: required route with issuers but no trust anchors should fail closed")
+	}
 }

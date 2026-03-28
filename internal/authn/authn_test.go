@@ -2,6 +2,7 @@ package authn_test
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -239,6 +240,32 @@ func TestMultiAuthn_NoAuthenticators_Optional_ReturnsNil(t *testing.T) {
 	}
 }
 
+func TestMultiAuthn_DifferentSPIFFEURIs_Conflict(t *testing.T) {
+	// Two different spiffe:// URIs are different principals — they must conflict.
+	// Previously this relied on sameSpiffePrincipal which was dead code; the
+	// simple string equality check handles both cases correctly.
+	m := authn.NewMultiAuthn([]authn.Authenticator{
+		&stubAuth{id: &identity.VerifiedIdentity{
+			Principal:      "spiffe://example.com/svc-a",
+			AssuranceScore: 30,
+			AuthMethods:    []identity.AuthMethod{identity.AuthMTLSSPIFFE},
+			Evidence:       []identity.IdentityEvidence{{Type: identity.EvidenceMTLSCert, Score: 30}},
+		}},
+		&stubAuth{id: &identity.VerifiedIdentity{
+			Principal:      "spiffe://example.com/svc-b", // different workload
+			AssuranceScore: 25,
+			AuthMethods:    []identity.AuthMethod{identity.AuthSPIFFEJWT},
+			Evidence:       []identity.IdentityEvidence{{Type: identity.EvidenceSPIFFEJWT, Score: 25}},
+		}},
+	}, true, 0)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	_, err := m.Authenticate(req)
+	if err == nil {
+		t.Error("expected error: two different SPIFFE URIs must conflict")
+	}
+}
+
 // ── three-way merge ───────────────────────────────────────────────────────────
 
 func TestMultiAuthn_ThreeAuthenticators_SamePrincipal_MergesAll(t *testing.T) {
@@ -307,6 +334,148 @@ func TestMultiAuthn_MinScoreZero_AnyScorePasses(t *testing.T) {
 	}
 	if id.AssuranceScore != 1 {
 		t.Errorf("expected score 1, got %d", id.AssuranceScore)
+	}
+}
+
+// ── nil identity with nil error ───────────────────────────────────────────────
+
+func TestMultiAuthn_NilIdentityNilError_TreatedAsNotApplicable(t *testing.T) {
+	// An authenticator that returns (nil, nil) violates the contract but must
+	// not cause a panic. It should be treated as not-applicable.
+	m := authn.NewMultiAuthn([]authn.Authenticator{
+		&stubAuth{id: nil, err: nil}, // contract violation
+		okAuth("oidc:auth.example.com:user-1", 15),
+	}, true, 0)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	id, err := m.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id == nil || id.Principal != "oidc:auth.example.com:user-1" {
+		t.Errorf("unexpected identity: %+v", id)
+	}
+}
+
+func TestMultiAuthn_AllNilIdentityNilError_RequiredFails(t *testing.T) {
+	// All authenticators returning (nil, nil) with required=true must fail,
+	// not silently pass as anonymous.
+	m := authn.NewMultiAuthn([]authn.Authenticator{
+		&stubAuth{id: nil, err: nil},
+	}, true, 0)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	_, err := m.Authenticate(req)
+	if err == nil {
+		t.Error("expected error when all authenticators return nil identity")
+	}
+}
+
+// ── wrapped ErrNotApplicable ──────────────────────────────────────────────────
+
+func TestMultiAuthn_WrappedErrNotApplicable_IsSkipped(t *testing.T) {
+	// errors.Is unwraps — a wrapped ErrNotApplicable must be skipped, not
+	// treated as invalid credentials.
+	wrapped := &stubAuth{err: fmt.Errorf("context: %w", authn.ErrNotApplicable)}
+	m := authn.NewMultiAuthn([]authn.Authenticator{
+		wrapped,
+		okAuth("oidc:auth.example.com:user-1", 15),
+	}, true, 0)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	id, err := m.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id == nil || id.Principal != "oidc:auth.example.com:user-1" {
+		t.Errorf("unexpected identity: %+v", id)
+	}
+}
+
+// ── invalid credentials on optional routes ────────────────────────────────────
+
+func TestMultiAuthn_InvalidCredentials_OptionalRoute_StillHardFails(t *testing.T) {
+	// required=false only affects the "no credentials at all" case.
+	// Invalid credentials (present but wrong) must always hard-fail — even on
+	// optional routes — to prevent credential downgrade attacks.
+	m := authn.NewMultiAuthn([]authn.Authenticator{
+		invalidAuth("token signature invalid"),
+	}, false, 0)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	_, err := m.Authenticate(req)
+	if err == nil {
+		t.Error("expected error: invalid credentials must hard-fail even on optional routes")
+	}
+	if errors.Is(err, authn.ErrNotApplicable) {
+		t.Error("invalid credentials must not return ErrNotApplicable")
+	}
+}
+
+// ── merge: groups and primary fields ─────────────────────────────────────────
+
+func TestMultiAuthn_GroupsMergedAcrossAuthenticators(t *testing.T) {
+	principal := "spiffe://example.com/svc"
+	m := authn.NewMultiAuthn([]authn.Authenticator{
+		&stubAuth{id: &identity.VerifiedIdentity{
+			Principal:      principal,
+			AssuranceScore: 30,
+			AuthMethods:    []identity.AuthMethod{identity.AuthMTLSSPIFFE},
+			Evidence:       []identity.IdentityEvidence{{Type: identity.EvidenceMTLSCert, Score: 30}},
+			Groups:         []string{"svc-mesh"},
+		}},
+		&stubAuth{id: &identity.VerifiedIdentity{
+			Principal:      principal,
+			AssuranceScore: 25,
+			AuthMethods:    []identity.AuthMethod{identity.AuthSPIFFEJWT},
+			Evidence:       []identity.IdentityEvidence{{Type: identity.EvidenceSPIFFEJWT, Score: 25}},
+			Groups:         []string{"kyc-verified"},
+		}},
+	}, true, 0)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	id, err := m.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(id.Groups) != 2 {
+		t.Errorf("expected 2 groups, got %d: %v", len(id.Groups), id.Groups)
+	}
+}
+
+func TestMultiAuthn_ClaimsAndIssuerFromPrimary(t *testing.T) {
+	// When multiple authenticators succeed, Claims and Issuer must come from
+	// the first authenticator (primary), not be overwritten by later ones.
+	primaryClaims := map[string]any{"email": "svc@example.com"}
+	m := authn.NewMultiAuthn([]authn.Authenticator{
+		&stubAuth{id: &identity.VerifiedIdentity{
+			Principal:      "spiffe://example.com/svc",
+			Issuer:         "https://primary.example.com",
+			AssuranceScore: 30,
+			AuthMethods:    []identity.AuthMethod{identity.AuthMTLSSPIFFE},
+			Evidence:       []identity.IdentityEvidence{{Type: identity.EvidenceMTLSCert, Score: 30}},
+			Claims:         primaryClaims,
+		}},
+		&stubAuth{id: &identity.VerifiedIdentity{
+			Principal:      "spiffe://example.com/svc",
+			Issuer:         "https://secondary.example.com",
+			AssuranceScore: 25,
+			AuthMethods:    []identity.AuthMethod{identity.AuthSPIFFEJWT},
+			Evidence:       []identity.IdentityEvidence{{Type: identity.EvidenceSPIFFEJWT, Score: 25}},
+			Claims:         map[string]any{"other": "claim"},
+		}},
+	}, true, 0)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	id, err := m.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id.Issuer != "https://primary.example.com" {
+		t.Errorf("issuer: got %q, want primary issuer", id.Issuer)
+	}
+	if id.Claims["email"] != "svc@example.com" {
+		t.Errorf("claims: got %v, want primary claims", id.Claims)
 	}
 }
 

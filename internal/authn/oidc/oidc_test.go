@@ -394,8 +394,6 @@ func TestValidator_JWKSCacheHit(t *testing.T) {
 	}
 }
 
-// ── constructor validation ────────────────────────────────────────────────────
-
 // ── not-before claim ──────────────────────────────────────────────────────────
 
 func TestValidator_NotYetValidToken(t *testing.T) {
@@ -481,6 +479,125 @@ func TestValidator_JWKSUnreachable_FailsClosed(t *testing.T) {
 	}
 }
 
+// ── missing exp claim ─────────────────────────────────────────────────────────
+
+func TestValidator_TokenWithoutExpClaim_Rejected(t *testing.T) {
+	// A token with no exp claim is a permanent credential — it never expires.
+	// jwt.WithValidate(true) only validates exp if present; we explicitly require it.
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, 15, "")
+	raw := keys.mint(t, func(b *jwt.Builder) {
+		// Build a token that omits the exp claim entirely.
+		// We override expiration with zero time to produce a token without exp.
+		b.Expiration(time.Time{})
+	})
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	_, err := v.Authenticate(req)
+	if err == nil {
+		t.Error("expected error for token without exp claim")
+	}
+	if err == authn.ErrNotApplicable {
+		t.Error("missing exp must hard-fail, not return ErrNotApplicable")
+	}
+}
+
+// ── lowercase bearer scheme ───────────────────────────────────────────────────
+
+func TestValidator_LowercaseBearerScheme_NotApplicable(t *testing.T) {
+	// RFC 7235 says the auth-scheme is case-insensitive, but we require "Bearer "
+	// (capital B). A lowercase "bearer" header is treated as not-applicable rather
+	// than a hard fail. This is documented behaviour: on required-auth routes the
+	// request still gets a 401 (no credentials); on optional routes it passes
+	// through as anonymous. Clients should always send "Bearer" with capital B.
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, 15, "")
+	raw := keys.mint(t)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "bearer "+raw) // lowercase
+	_, err := v.Authenticate(req)
+	if err != authn.ErrNotApplicable {
+		t.Errorf("expected ErrNotApplicable for lowercase bearer scheme, got %v", err)
+	}
+}
+
+// ── identity field correctness ────────────────────────────────────────────────
+
+func TestValidator_AuthMethodIsOIDC(t *testing.T) {
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, 15, "")
+	raw := keys.mint(t)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	id, err := v.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(id.AuthMethods) != 1 {
+		t.Fatalf("expected 1 auth method, got %d", len(id.AuthMethods))
+	}
+	// Import cycle prevents using identity.AuthOIDC directly here, but the
+	// string value is stable and part of the public contract.
+	if string(id.AuthMethods[0]) != "OIDC" {
+		t.Errorf("auth method: got %q, want OIDC", id.AuthMethods[0])
+	}
+}
+
+func TestValidator_EvidenceScoreMatchesAssuranceScore(t *testing.T) {
+	// The score recorded in Evidence must equal AssuranceScore — they must stay
+	// in sync so audit logs and score reconstruction are consistent.
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, 25, "")
+	raw := keys.mint(t)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	id, err := v.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(id.Evidence) != 1 {
+		t.Fatalf("expected 1 evidence item, got %d", len(id.Evidence))
+	}
+	if id.Evidence[0].Score != id.AssuranceScore {
+		t.Errorf("evidence score %d != assurance score %d", id.Evidence[0].Score, id.AssuranceScore)
+	}
+}
+
+func TestValidator_MultipleAudiences_AcceptsWhenConfiguredAudiencePresent(t *testing.T) {
+	// JWT spec allows aud to be an array. The token is valid as long as the
+	// configured audience appears somewhere in that array.
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, 15, "")
+	raw := keys.mint(t, func(b *jwt.Builder) {
+		b.Audience([]string{"https://other-api.internal", testAudience})
+	})
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	if _, err := v.Authenticate(req); err != nil {
+		t.Errorf("expected success when configured audience is in multi-audience token: %v", err)
+	}
+}
+
 // ── constructor validation ────────────────────────────────────────────────────
 
 func TestNew_MissingIssuerReturnsError(t *testing.T) {
@@ -496,5 +613,22 @@ func TestNew_MissingJWKSUriReturnsError(t *testing.T) {
 	_, err := authnoidc.New(testIssuer, testAudience, "", 15, cache, "")
 	if err == nil {
 		t.Error("expected error for missing jwks_uri")
+	}
+}
+
+func TestNew_NonHTTPJWKSUriReturnsError(t *testing.T) {
+	// file:// or other non-HTTP URIs must be rejected at construction time.
+	// Accepting them would allow an operator misconfiguration to load keys
+	// from the local filesystem instead of a real JWKS endpoint.
+	cache := jwk.NewCache(t.Context())
+	for _, uri := range []string{
+		"file:///etc/passwd",
+		"ftp://keys.example.com/jwks.json",
+		"javascript:alert(1)",
+	} {
+		_, err := authnoidc.New(testIssuer, testAudience, uri, 15, cache, "")
+		if err == nil {
+			t.Errorf("expected error for non-http jwks_uri %q", uri)
+		}
 	}
 }

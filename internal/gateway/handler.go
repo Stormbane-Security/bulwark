@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -71,6 +72,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Normalize the URL path to prevent route confusion via path traversal.
+	// Without this, /public/../admin resolves to /admin on the upstream while
+	// matching the /public route here — potentially bypassing auth on /admin.
+	// We normalize both Path and RawPath so the proxy forwards the clean path.
+	rawPath := r.URL.Path
+	if rawPath == "" {
+		rawPath = "/"
+	}
+	if cleaned := path.Clean(rawPath); cleaned != rawPath {
+		r.URL.Path = cleaned
+		r.URL.RawPath = "" // stale RawPath is cleared; proxy re-derives from Path
+	}
+
 	// Step 2: Route match.
 	matched := h.router.match(r)
 	if matched == nil {
@@ -86,9 +100,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var err error
 		id, err = auth.Authenticate(r)
 		if err != nil {
+			errMsg := err.Error()
 			rw := &responseWriter{ResponseWriter: w, status: http.StatusUnauthorized}
 			http.Error(rw, "unauthorized", http.StatusUnauthorized)
-			h.emitAudit(reqID, start, r, matched.upstream, rw.status, nil, nil)
+			h.emitAudit(reqID, start, r, matched.upstream, rw.status, &errMsg, nil)
 			return
 		}
 	}

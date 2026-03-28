@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/stormbane-security/bulwark/internal/identity"
 )
@@ -83,6 +82,13 @@ func (m *MultiAuthn) Authenticate(req *http.Request) (*identity.VerifiedIdentity
 			// Credentials were present but invalid — hard 401, no fallback.
 			return nil, err
 		}
+		if id == nil {
+			// Returning (nil, nil) violates the Authenticator contract — the correct
+			// signal for "no credentials" is ErrNotApplicable. Treat it defensively
+			// as not-applicable rather than appending a nil pointer that would panic
+			// in merge.
+			continue
+		}
 		collected = append(collected, id)
 	}
 
@@ -108,7 +114,7 @@ func (m *MultiAuthn) Authenticate(req *http.Request) (*identity.VerifiedIdentity
 
 // merge combines multiple VerifiedIdentities from different authenticators
 // into a single identity with additive scores. Returns an error if two
-// authenticators assert different, non-SPIFFE-matching principals.
+// authenticators assert different principals.
 func merge(ids []*identity.VerifiedIdentity) (*identity.VerifiedIdentity, error) {
 	if len(ids) == 1 {
 		return ids[0], nil
@@ -116,7 +122,7 @@ func merge(ids []*identity.VerifiedIdentity) (*identity.VerifiedIdentity, error)
 
 	primary := ids[0]
 	for _, id := range ids[1:] {
-		if id.Principal != primary.Principal && !sameSpiffePrincipal(primary.Principal, id.Principal) {
+		if id.Principal != primary.Principal {
 			return nil, fmt.Errorf("conflicting principals: %q and %q",
 				primary.Principal, id.Principal)
 		}
@@ -135,12 +141,4 @@ func merge(ids []*identity.VerifiedIdentity) (*identity.VerifiedIdentity, error)
 	}
 
 	return merged, nil
-}
-
-// sameSpiffePrincipal returns true when both principals are identical SPIFFE
-// URIs — handles the case where an mTLS SPIFFE SAN matches a SPIFFE JWT subject.
-func sameSpiffePrincipal(a, b string) bool {
-	return strings.HasPrefix(a, "spiffe://") &&
-		strings.HasPrefix(b, "spiffe://") &&
-		a == b
 }
