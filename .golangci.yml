@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  # Default-enabled linters (errcheck, govet, gosimple, staticcheck,
+  # ineffassign, unused) are kept. We add the ones below on top.
+  enable:
+    - bodyclose    # unclosed http.Response.Body
+    - gosec        # security issues (G-series rules)
+    - misspell     # spelling errors in comments/strings
+    - noctx        # http.Request created without context
+    - exhaustive   # missing cases in switch on named type
+    - nilerr       # return nil instead of err
+    - errorlint    # errors.Is/As usage
+
+linters-settings:
+  gosec:
+    excludes:
+      - G115 # integer overflow on conversion — too noisy for this codebase
+
+  exhaustive:
+    default-signifies-exhaustive: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

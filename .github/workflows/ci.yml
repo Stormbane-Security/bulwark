@@ -1,0 +1,262 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, dev]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BULWARK: ghcr.io/stormbane-security/bulwark
+  IMAGE_TESTAPI: ghcr.io/stormbane-security/bulwark-testapi
+
+jobs:
+  # ── Go quality + security checks ─────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        id: go-vet
+        run: go vet ./...
+        continue-on-error: true
+
+      - name: go test (race detector)
+        id: go-test
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+        continue-on-error: true
+
+      - name: Parse coverage
+        id: coverage
+        if: always()
+        run: |
+          if [ -f coverage.out ]; then
+            pct=$(go tool cover -func=coverage.out | grep ^total | awk '{print $3}')
+            echo "pct=$pct" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Runs govet, errcheck, staticcheck, gosec, bodyclose, misspell, noctx,
+      # exhaustive, nilerr, errorlint, and more — config in .golangci.yml.
+      - name: golangci-lint
+        id: lint
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+        continue-on-error: true
+        with:
+          version: v2.11.4
+
+      # govulncheck queries the Go vulnerability database for known CVEs in
+      # direct and transitive dependencies. Kept separate from golangci-lint
+      # because it uses the authoritative govulndb, not a static ruleset.
+      - name: govulncheck
+        id: govulncheck
+        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1.0.4
+        continue-on-error: true
+        with:
+          go-version-file: go.mod
+          go-package: ./...
+          repo-checkout: false
+
+      - name: Write job summary
+        if: always()
+        run: |
+          icon() {
+            case "$1" in
+              success) echo "✅" ;;
+              skipped) echo "⏭️" ;;
+              *) echo "❌" ;;
+            esac
+          }
+
+          vet_icon=$(icon "${{ steps.go-vet.outcome }}")
+          test_icon=$(icon "${{ steps.go-test.outcome }}")
+          lint_icon=$(icon "${{ steps.lint.outcome }}")
+          vuln_icon=$(icon "${{ steps.govulncheck.outcome }}")
+
+          cov="${{ steps.coverage.outputs.pct }}"
+          cov_note=""
+          [ -n "$cov" ] && cov_note=" ($cov coverage)"
+
+          {
+            echo "## Test"
+            echo ""
+            echo "| Check | Result |"
+            echo "|-------|--------|"
+            echo "| \`go vet\` | $vet_icon |"
+            echo "| \`go test -race\` | $test_icon$cov_note |"
+            echo "| golangci-lint | $lint_icon |"
+            echo "| govulncheck | $vuln_icon |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Fail the job if any check didn't pass
+          if [ "${{ steps.go-vet.outcome }}" != "success" ] || \
+             [ "${{ steps.go-test.outcome }}" != "success" ] || \
+             [ "${{ steps.lint.outcome }}" != "success" ] || \
+             [ "${{ steps.govulncheck.outcome }}" != "success" ]; then
+            exit 1
+          fi
+
+  # ── Container build, push, and image scanning ─────────────────────────────────
+  build:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GitHub Packages
+        if: github.event_name == 'push'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata — bulwark
+        id: meta-bulwark
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE_BULWARK }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Extract metadata — testapi
+        id: meta-testapi
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE_TESTAPI }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # load: true makes the image available to the local Docker daemon so
+      # Trivy can scan it without pulling from the registry. On push events
+      # the image is also pushed to ghcr.io at the same time.
+      - name: Build & push — bulwark
+        id: build-bulwark
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        continue-on-error: true
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta-bulwark.outputs.tags }}
+          labels: ${{ steps.meta-bulwark.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push — testapi
+        id: build-testapi
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        continue-on-error: true
+        with:
+          context: .
+          file: Dockerfile.testapi
+          load: true
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta-testapi.outputs.tags }}
+          labels: ${{ steps.meta-testapi.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Trivy container image scanning ──────────────────────────────────────
+      # SECURITY NOTICE: aquasecurity/trivy-action was compromised 2026-03-19.
+      # (GHSA-69fq-xp46-6x23) — attackers force-pushed 76/77 version tags to
+      # malicious commits. This workflow is pinned to commit 57a97c7 (v0.35.0),
+      # the last SHA confirmed safe prior to the compromise.
+      #
+      # DO NOT update this action by tag. Before bumping the SHA, verify the
+      # target commit against the security advisory:
+      # https://github.com/aquasecurity/trivy/security/advisories/GHSA-69fq-xp46-6x23
+      - name: Trivy scan — bulwark
+        id: trivy-bulwark
+        if: steps.build-bulwark.outcome == 'success'
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 PRE-ATTACK SAFE
+        continue-on-error: true
+        with:
+          image-ref: ${{ steps.build-bulwark.outputs.imageid }}
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Trivy scan — testapi
+        id: trivy-testapi
+        if: steps.build-testapi.outcome == 'success'
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 PRE-ATTACK SAFE
+        continue-on-error: true
+        with:
+          image-ref: ${{ steps.build-testapi.outputs.imageid }}
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Write job summary
+        if: always()
+        run: |
+          icon() {
+            case "$1" in
+              success) echo "✅" ;;
+              skipped) echo "⏭️" ;;
+              *) echo "❌" ;;
+            esac
+          }
+
+          build_b=$(icon "${{ steps.build-bulwark.outcome }}")
+          build_t=$(icon "${{ steps.build-testapi.outcome }}")
+          trivy_b=$(icon "${{ steps.trivy-bulwark.outcome }}")
+          trivy_t=$(icon "${{ steps.trivy-testapi.outcome }}")
+
+          pushed="${{ github.event_name == 'push' }}"
+
+          {
+            echo "## Build & Push"
+            echo ""
+            echo "**Event:** \`${{ github.event_name }}\` · **Ref:** \`${{ github.ref_name }}\` · **SHA:** \`${{ github.sha }}\`"
+            echo ""
+            echo "| Image | Build | Trivy |"
+            echo "|-------|-------|-------|"
+            echo "| \`bulwark\` | $build_b | $trivy_b |"
+            echo "| \`testapi\` | $build_t | $trivy_t |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$pushed" = "true" ]; then
+            {
+              echo "### Tags pushed"
+              echo "\`\`\`"
+              printf '%s\n' "${{ steps.meta-bulwark.outputs.tags }}"
+              printf '%s\n' "${{ steps.meta-testapi.outputs.tags }}"
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "> **Pull request** — images built and scanned locally, not pushed to registry." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Fail if any step didn't succeed (skipped trivy = build failed, also a failure)
+          if [ "${{ steps.build-bulwark.outcome }}" != "success" ] || \
+             [ "${{ steps.build-testapi.outcome }}" != "success" ] || \
+             [ "${{ steps.trivy-bulwark.outcome }}" != "success" ] || \
+             [ "${{ steps.trivy-testapi.outcome }}" != "success" ]; then
+            exit 1
+          fi
