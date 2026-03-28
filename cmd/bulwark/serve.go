@@ -10,8 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/patrickputman/bulwark/internal/audit"
-	"github.com/patrickputman/bulwark/internal/config"
+	"github.com/stormbane-security/bulwark/internal/audit"
+	"github.com/stormbane-security/bulwark/internal/config"
+	"github.com/stormbane-security/bulwark/internal/gateway"
 	"github.com/spf13/cobra"
 )
 
@@ -39,26 +40,25 @@ func serveCmd() *cobra.Command {
 
 func serve(cfg *config.Config) error {
 	auditLog := audit.NewJSONLogger(os.Stdout)
-	_ = auditLog // will be wired into the pipeline in Phase 1
 
 	if len(cfg.Listeners) == 0 {
 		return fmt.Errorf("no listeners configured")
 	}
 
-	// Phase 0: single listener only. Full pipeline wired in Phase 1.
+	// Phase 1: single listener only. Multi-listener support deferred.
 	if len(cfg.Listeners) > 1 {
 		fmt.Fprintf(os.Stderr, "bulwark: warning: %d listeners configured, only the first will be started in this build\n", len(cfg.Listeners))
 	}
 	l := cfg.Listeners[0]
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not implemented", http.StatusNotImplemented)
-	})
+	handler, err := gateway.NewHandler(cfg, auditLog)
+	if err != nil {
+		return fmt.Errorf("gateway: %w", err)
+	}
 
 	srv := &http.Server{
 		Addr:    l.Addr,
-		Handler: mux,
+		Handler: handler,
 	}
 
 	// Bind the listener early so we fail fast on address conflicts.

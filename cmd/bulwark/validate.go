@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/patrickputman/bulwark/internal/config"
+	"github.com/stormbane-security/bulwark/internal/config"
 	"github.com/spf13/cobra"
 )
 

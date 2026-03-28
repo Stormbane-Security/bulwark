@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/patrickputman/bulwark/internal/config"
+	"github.com/stormbane-security/bulwark/internal/config"
 )
 
 // ── happy path ────────────────────────────────────────────────────────────────

@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, dev]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BULWARK: ghcr.io/stormbane-security/bulwark
+  IMAGE_TESTAPI: ghcr.io/stormbane-security/bulwark-testapi
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+  build:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    # Only push images on pushes to main or dev; PRs only build (no push).
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Packages
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata — bulwark
+        id: meta-bulwark
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_BULWARK }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Extract metadata — testapi
+        id: meta-testapi
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_TESTAPI }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push — bulwark
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta-bulwark.outputs.tags }}
+          labels: ${{ steps.meta-bulwark.outputs.labels }}
+
+      - name: Build & push — testapi
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.testapi
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta-testapi.outputs.tags }}
+          labels: ${{ steps.meta-testapi.outputs.labels }}

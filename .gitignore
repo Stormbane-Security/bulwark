@@ -1,4 +1,5 @@
 /bulwark
+/testapi
 dist/
 *.test
 *.out

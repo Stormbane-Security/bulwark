@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/patrickputman/bulwark/internal/audit"
+	"github.com/stormbane-security/bulwark/internal/audit"
 )
 
 func TestJSONAuditLogger_EmitsValidJSON(t *testing.T) {

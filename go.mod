@@ -1,4 +1,4 @@
-module github.com/patrickputman/bulwark
+module github.com/stormbane-security/bulwark
 
 go 1.25.6
 

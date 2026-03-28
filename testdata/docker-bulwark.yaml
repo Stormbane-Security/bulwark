@@ -1,0 +1,18 @@
+# Bulwark configuration for docker-compose local dev.
+# Bulwark listens on :8080 and proxies to the testapi container.
+# Host matching uses the value the client sends in the Host header —
+# when curling through the gateway use -H "Host: api.local" or just
+# hit localhost:8080 with the header set.
+
+listeners:
+  - addr: ":8080"
+
+routes:
+  - id: testapi
+    match:
+      host: api.local
+      path_prefix: /
+    upstream:
+      url: http://testapi:9090
+    authn:
+      required: false   # Phase 1 — no auth yet
