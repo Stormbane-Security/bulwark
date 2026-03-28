@@ -12,9 +12,10 @@ import (
 
 // Config is the root Bulwark configuration.
 type Config struct {
-	Listeners []ListenerConfig `yaml:"listeners"`
-	Routes    []RouteConfig    `yaml:"routes"`
-	Policies  []PolicyConfig   `yaml:"policies"`
+	Listeners    []ListenerConfig    `yaml:"listeners"`
+	Routes       []RouteConfig       `yaml:"routes"`
+	Policies     []PolicyConfig      `yaml:"policies"`
+	TrustAnchors []TrustAnchorConfig `yaml:"trust_anchors,omitempty"`
 }
 
 // ListenerConfig defines a network listener.
@@ -67,10 +68,26 @@ type UpstreamAuth struct {
 	BearerToken string `yaml:"bearer_token,omitempty"`
 }
 
+// TrustAnchorConfig defines a trusted identity provider. Trust anchors are
+// declared at the top level and referenced by ID from route authn configs.
+type TrustAnchorConfig struct {
+	ID                string `yaml:"id"`
+	Type              string `yaml:"type"`                         // oidc, mtls, spiffe_jwt
+	Issuer            string `yaml:"issuer,omitempty"`
+	Audience          string `yaml:"audience,omitempty"`
+	JWKSUri           string `yaml:"jwks_uri,omitempty"`
+	CABundle          string `yaml:"ca_bundle,omitempty"`
+	SpiffeTrustDomain string `yaml:"spiffe_trust_domain,omitempty"`
+	PrincipalPrefix   string `yaml:"principal_prefix,omitempty"`
+	Score             int    `yaml:"score,omitempty"` // 0 = use type default
+}
+
 // AuthnConfig defines authentication requirements for a route.
 type AuthnConfig struct {
 	Required bool           `yaml:"required"`
-	Issuers  []IssuerConfig `yaml:"issuers,omitempty"`
+	Issuers  []IssuerConfig `yaml:"issuers,omitempty"` // backward compat
+	Trust    []string       `yaml:"trust,omitempty"`   // trust anchor IDs (Phase 2+)
+	MinScore int            `yaml:"min_score,omitempty"`
 }
 
 // IssuerConfig defines a trusted identity issuer for a route.

@@ -23,6 +23,21 @@ func validate(cfg *Config) error {
 		policyIDs[p.ID] = struct{}{}
 	}
 
+	// Build trust anchor ID set for reference checking; reject duplicates.
+	anchorIDs := make(map[string]struct{}, len(cfg.TrustAnchors))
+	for i, a := range cfg.TrustAnchors {
+		if a.ID == "" {
+			return fmt.Errorf("config: trust_anchors[%d]: id is required", i)
+		}
+		if _, exists := anchorIDs[a.ID]; exists {
+			return fmt.Errorf("config: trust_anchors[%d]: duplicate trust anchor id %q", i, a.ID)
+		}
+		anchorIDs[a.ID] = struct{}{}
+		if err := validateTrustAnchor(i, &cfg.TrustAnchors[i]); err != nil {
+			return err
+		}
+	}
+
 	for i := range cfg.Listeners {
 		if err := validateListener(i, &cfg.Listeners[i]); err != nil {
 			return err
@@ -39,7 +54,7 @@ func validate(cfg *Config) error {
 			}
 			routeIDs[r.ID] = struct{}{}
 		}
-		if err := validateRoute(i, r, policyIDs); err != nil {
+		if err := validateRoute(i, r, policyIDs, anchorIDs); err != nil {
 			return err
 		}
 		// Apply defaults after validation so checks see the operator-supplied value.
@@ -71,7 +86,7 @@ func validateListener(i int, l *ListenerConfig) error {
 	return nil
 }
 
-func validateRoute(i int, r *RouteConfig, policyIDs map[string]struct{}) error {
+func validateRoute(i int, r *RouteConfig, policyIDs, anchorIDs map[string]struct{}) error {
 	if r.ID == "" {
 		return fmt.Errorf("config: routes[%d]: id is required", i)
 	}
@@ -86,13 +101,18 @@ func validateRoute(i int, r *RouteConfig, policyIDs map[string]struct{}) error {
 			return err
 		}
 	}
-	// required:true with no issuers is a broken config: nothing can ever authenticate.
-	if r.Authn.Required && len(r.Authn.Issuers) == 0 {
-		return fmt.Errorf("config: routes[%d].authn: at least one issuer is required when authn.required is true", i)
+	// required:true with no issuers and no trust anchors is a broken config.
+	if r.Authn.Required && len(r.Authn.Issuers) == 0 && len(r.Authn.Trust) == 0 {
+		return fmt.Errorf("config: routes[%d].authn: at least one issuer or trust anchor is required when authn.required is true", i)
 	}
 	for j := range r.Authn.Issuers {
 		if err := validateIssuer(i, j, &r.Authn.Issuers[j]); err != nil {
 			return err
+		}
+	}
+	for j, anchorID := range r.Authn.Trust {
+		if _, ok := anchorIDs[anchorID]; !ok {
+			return fmt.Errorf("config: routes[%d].authn.trust[%d]: trust anchor %q is not defined", i, j, anchorID)
 		}
 	}
 	if r.Policy != "" {
@@ -126,6 +146,26 @@ var validUpstreamAuthTypes = map[string]struct{}{
 func validateUpstreamAuth(routeIdx int, auth *UpstreamAuth) error {
 	if _, ok := validUpstreamAuthTypes[auth.Type]; !ok {
 		return fmt.Errorf("config: routes[%d].upstream.auth: invalid type %q (must be bulwark_jwt, mtls, or static_bearer)", routeIdx, auth.Type)
+	}
+	return nil
+}
+
+var validTrustAnchorTypes = map[string]struct{}{
+	"oidc":       {},
+	"mtls":       {},
+	"spiffe_jwt": {},
+	"http_sig":   {},
+}
+
+func validateTrustAnchor(i int, a *TrustAnchorConfig) error {
+	if _, ok := validTrustAnchorTypes[a.Type]; !ok {
+		return fmt.Errorf("config: trust_anchors[%d] %q: invalid type %q (must be oidc, mtls, spiffe_jwt, or http_sig)", i, a.ID, a.Type)
+	}
+	switch a.Type {
+	case "oidc", "spiffe_jwt":
+		if a.JWKSUri == "" {
+			return fmt.Errorf("config: trust_anchors[%d] %q: jwks_uri is required for type %q", i, a.ID, a.Type)
+		}
 	}
 	return nil
 }

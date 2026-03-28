@@ -18,19 +18,28 @@ type Decision struct {
 	MatchedRule string `json:"matched_rule,omitempty"` // OPA rule ID or "default deny"
 }
 
+// IdentityAudit is the identity fragment included in an audit event.
+type IdentityAudit struct {
+	Principal      string   `json:"principal"`
+	Issuer         string   `json:"issuer,omitempty"`
+	AuthMethods    []string `json:"auth_methods,omitempty"`
+	AssuranceScore int      `json:"assurance_score"`
+}
+
 // Event is one audit record per request, emitted after the response is sent.
 type Event struct {
-	RequestID  string    `json:"request_id"`
-	Timestamp  time.Time `json:"timestamp"`
-	ClientIP   string    `json:"client_ip,omitempty"`
-	Method     string    `json:"method,omitempty"`
-	Host       string    `json:"host,omitempty"`
-	Path       string    `json:"path,omitempty"`
-	Upstream   string    `json:"upstream,omitempty"`
-	StatusCode int       `json:"status_code"`
-	LatencyMS  int64     `json:"latency_ms"`
-	Decision   *Decision `json:"decision,omitempty"`
-	Error      *string   `json:"error,omitempty"`
+	RequestID  string         `json:"request_id"`
+	Timestamp  time.Time      `json:"timestamp"`
+	ClientIP   string         `json:"client_ip,omitempty"`
+	Method     string         `json:"method,omitempty"`
+	Host       string         `json:"host,omitempty"`
+	Path       string         `json:"path,omitempty"`
+	Upstream   string         `json:"upstream,omitempty"`
+	StatusCode int            `json:"status_code"`
+	LatencyMS  int64          `json:"latency_ms"`
+	Identity   *IdentityAudit `json:"identity,omitempty"`
+	Decision   *Decision      `json:"decision,omitempty"`
+	Error      *string        `json:"error,omitempty"`
 
 	// Latency is set by callers using Go duration types; Emit converts it to
 	// LatencyMS for serialization. Not included in JSON output.

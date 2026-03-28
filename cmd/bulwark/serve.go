@@ -10,10 +10,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/spf13/cobra"
+
 	"github.com/stormbane-security/bulwark/internal/audit"
 	"github.com/stormbane-security/bulwark/internal/config"
 	"github.com/stormbane-security/bulwark/internal/gateway"
-	"github.com/spf13/cobra"
 )
 
 func serveCmd() *cobra.Command {
@@ -39,10 +41,21 @@ func serveCmd() *cobra.Command {
 }
 
 func serve(cfg *config.Config) error {
+	// Server context: cancelled on shutdown so JWKS cache background goroutines stop cleanly.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	auditLog := audit.NewJSONLogger(os.Stdout)
 
 	if len(cfg.Listeners) == 0 {
 		return fmt.Errorf("no listeners configured")
+	}
+
+	// Phase 2: build per-route authenticators from trust anchor config.
+	jwksCache := jwk.NewCache(ctx)
+	authenticators, err := gateway.BuildAuthn(cfg, jwksCache)
+	if err != nil {
+		return fmt.Errorf("authn: %w", err)
 	}
 
 	// Phase 1: single listener only. Multi-listener support deferred.
@@ -51,7 +64,7 @@ func serve(cfg *config.Config) error {
 	}
 	l := cfg.Listeners[0]
 
-	handler, err := gateway.NewHandler(cfg, auditLog)
+	handler, err := gateway.NewHandler(cfg, authenticators, auditLog)
 	if err != nil {
 		return fmt.Errorf("gateway: %w", err)
 	}

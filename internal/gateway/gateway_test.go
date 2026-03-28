@@ -1,14 +1,17 @@
 package gateway_test
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/stormbane-security/bulwark/internal/audit"
+	"github.com/stormbane-security/bulwark/internal/authn"
 	"github.com/stormbane-security/bulwark/internal/config"
 	"github.com/stormbane-security/bulwark/internal/gateway"
+	"github.com/stormbane-security/bulwark/internal/identity"
 )
 
 // newTestConfig builds a minimal config.Config suitable for gateway tests
@@ -56,7 +59,7 @@ func TestHandler_404OnNoRouteMatch(t *testing.T) {
 			Authn:    config.AuthnConfig{Required: false},
 		},
 	})
-	h, err := gateway.NewHandler(cfg, silentAudit())
+	h, err := gateway.NewHandler(cfg, nil, silentAudit())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -82,7 +85,7 @@ func TestHandler_MatchByHostAndPath(t *testing.T) {
 			Authn:    config.AuthnConfig{Required: false},
 		},
 	})
-	h, err := gateway.NewHandler(cfg, silentAudit())
+	h, err := gateway.NewHandler(cfg, nil, silentAudit())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -120,7 +123,7 @@ func TestHandler_LongestPathPrefixWins(t *testing.T) {
 			Authn:    config.AuthnConfig{Required: false},
 		},
 	})
-	h, err := gateway.NewHandler(cfg, silentAudit())
+	h, err := gateway.NewHandler(cfg, nil, silentAudit())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -156,7 +159,7 @@ func TestHandler_HostMismatchIs404(t *testing.T) {
 			Authn:    config.AuthnConfig{Required: false},
 		},
 	})
-	h, err := gateway.NewHandler(cfg, silentAudit())
+	h, err := gateway.NewHandler(cfg, nil, silentAudit())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -184,7 +187,7 @@ func TestHandler_StripsBulwarkHeadersFromUpstream(t *testing.T) {
 			Authn:    config.AuthnConfig{Required: false},
 		},
 	})
-	h, err := gateway.NewHandler(cfg, silentAudit())
+	h, err := gateway.NewHandler(cfg, nil, silentAudit())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -218,7 +221,7 @@ func TestHandler_PreservesNonBulwarkHeaders(t *testing.T) {
 			Authn:    config.AuthnConfig{Required: false},
 		},
 	})
-	h, err := gateway.NewHandler(cfg, silentAudit())
+	h, err := gateway.NewHandler(cfg, nil, silentAudit())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -255,7 +258,7 @@ func TestHandler_502OnUnreachableUpstream(t *testing.T) {
 			Authn:    config.AuthnConfig{Required: false},
 		},
 	})
-	h, err := gateway.NewHandler(cfg, silentAudit())
+	h, err := gateway.NewHandler(cfg, nil, silentAudit())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -281,7 +284,7 @@ func TestHandler_UpstreamErrorStatusProxied(t *testing.T) {
 			Authn:    config.AuthnConfig{Required: false},
 		},
 	})
-	h, err := gateway.NewHandler(cfg, silentAudit())
+	h, err := gateway.NewHandler(cfg, nil, silentAudit())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -312,7 +315,7 @@ func TestHandler_AuditEventEmitted(t *testing.T) {
 			Authn:    config.AuthnConfig{Required: false},
 		},
 	})
-	h, err := gateway.NewHandler(cfg, logger)
+	h, err := gateway.NewHandler(cfg, nil, logger)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -361,7 +364,7 @@ func TestHandler_AuditEventOn404(t *testing.T) {
 			Authn:    config.AuthnConfig{Required: false},
 		},
 	})
-	h, err := gateway.NewHandler(cfg, logger)
+	h, err := gateway.NewHandler(cfg, nil, logger)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -378,6 +381,160 @@ func TestHandler_AuditEventOn404(t *testing.T) {
 	}
 	if captured[0].Upstream != "" {
 		t.Errorf("expected empty upstream on 404, got %q", captured[0].Upstream)
+	}
+}
+
+// ── authn pipeline ────────────────────────────────────────────────────────────
+
+// stubAuth is a configurable authn.Authenticator for gateway pipeline tests.
+type stubAuth struct {
+	id  *identity.VerifiedIdentity
+	err error
+}
+
+func (s *stubAuth) Authenticate(_ *http.Request) (*identity.VerifiedIdentity, error) {
+	return s.id, s.err
+}
+
+func TestHandler_AuthnRequired_NoCredentials_Returns401(t *testing.T) {
+	upstream := newTestUpstream(http.StatusOK, "ok")
+	defer upstream.Close()
+
+	cfg := newTestConfig([]config.RouteConfig{
+		{
+			ID:       "r1",
+			Match:    config.MatchConfig{Host: "api.internal", PathPrefix: "/"},
+			Upstream: config.UpstreamConfig{URL: upstream.URL},
+			Authn:    config.AuthnConfig{Required: true},
+		},
+	})
+	auth := map[string]authn.Authenticator{
+		"r1": &stubAuth{err: errors.New("no credentials provided")},
+	}
+	h, err := gateway.NewHandler(cfg, auth, silentAudit())
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestHandler_AuthnRequired_ValidCredentials_Proxied(t *testing.T) {
+	upstream := newTestUpstream(http.StatusOK, "ok")
+	defer upstream.Close()
+
+	cfg := newTestConfig([]config.RouteConfig{
+		{
+			ID:       "r1",
+			Match:    config.MatchConfig{Host: "api.internal", PathPrefix: "/"},
+			Upstream: config.UpstreamConfig{URL: upstream.URL},
+			Authn:    config.AuthnConfig{Required: true},
+		},
+	})
+	verifiedID := &identity.VerifiedIdentity{
+		Principal:      "oidc:auth.example.com:svc-123",
+		Issuer:         "https://auth.example.com",
+		AuthMethods:    []identity.AuthMethod{identity.AuthOIDC},
+		AssuranceScore: 15,
+	}
+	auth := map[string]authn.Authenticator{
+		"r1": &stubAuth{id: verifiedID},
+	}
+	h, err := gateway.NewHandler(cfg, auth, silentAudit())
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestHandler_AuthnOptional_NoCredentials_Proxied(t *testing.T) {
+	upstream := newTestUpstream(http.StatusOK, "ok")
+	defer upstream.Close()
+
+	cfg := newTestConfig([]config.RouteConfig{
+		{
+			ID:       "r1",
+			Match:    config.MatchConfig{Host: "api.internal", PathPrefix: "/"},
+			Upstream: config.UpstreamConfig{URL: upstream.URL},
+			Authn:    config.AuthnConfig{Required: false},
+		},
+	})
+	// Optional authn returns nil identity (no credentials) — should still proxy.
+	auth := map[string]authn.Authenticator{
+		"r1": &stubAuth{id: nil, err: nil},
+	}
+	h, err := gateway.NewHandler(cfg, auth, silentAudit())
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestHandler_AuditEventIncludesIdentity(t *testing.T) {
+	upstream := newTestUpstream(http.StatusOK, "ok")
+	defer upstream.Close()
+
+	var captured []audit.Event
+	logger := &captureLogger{events: &captured}
+
+	cfg := newTestConfig([]config.RouteConfig{
+		{
+			ID:       "r1",
+			Match:    config.MatchConfig{Host: "api.internal", PathPrefix: "/"},
+			Upstream: config.UpstreamConfig{URL: upstream.URL},
+			Authn:    config.AuthnConfig{Required: true},
+		},
+	})
+	verifiedID := &identity.VerifiedIdentity{
+		Principal:      "spiffe://example.com/svc",
+		Issuer:         "https://spire.example.com",
+		AuthMethods:    []identity.AuthMethod{identity.AuthSPIFFEJWT},
+		AssuranceScore: 25,
+	}
+	auth := map[string]authn.Authenticator{
+		"r1": &stubAuth{id: verifiedID},
+	}
+	h, err := gateway.NewHandler(cfg, auth, logger)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/orders", nil)
+	h.ServeHTTP(rec, req)
+
+	if len(captured) != 1 {
+		t.Fatalf("expected 1 audit event, got %d", len(captured))
+	}
+	ev := captured[0]
+	if ev.Identity == nil {
+		t.Fatal("expected identity in audit event")
+	}
+	if ev.Identity.Principal != verifiedID.Principal {
+		t.Errorf("principal: got %q, want %q", ev.Identity.Principal, verifiedID.Principal)
+	}
+	if ev.Identity.AssuranceScore != 25 {
+		t.Errorf("score: got %d, want 25", ev.Identity.AssuranceScore)
 	}
 }
 

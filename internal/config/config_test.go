@@ -592,3 +592,197 @@ routes:
 		t.Errorf("expected literal token unchanged")
 	}
 }
+
+// ── trust anchors ─────────────────────────────────────────────────────────────
+
+func TestLoad_TrustAnchorOIDC(t *testing.T) {
+	yaml := `
+listeners:
+  - addr: ":8080"
+
+trust_anchors:
+  - id: auth0-users
+    type: oidc
+    issuer: https://example.auth0.com
+    audience: https://api.internal
+    jwks_uri: https://example.auth0.com/.well-known/jwks.json
+    score: 15
+
+routes:
+  - id: r
+    match:
+      host: api.internal
+      path_prefix: /
+    upstream:
+      url: http://api:8080
+    authn:
+      required: true
+      trust: [auth0-users]
+      min_score: 15
+`
+	cfg, err := config.LoadReader(strings.NewReader(yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.TrustAnchors) != 1 {
+		t.Fatalf("expected 1 trust anchor, got %d", len(cfg.TrustAnchors))
+	}
+	a := cfg.TrustAnchors[0]
+	if a.ID != "auth0-users" {
+		t.Errorf("unexpected id: %q", a.ID)
+	}
+	if a.Type != "oidc" {
+		t.Errorf("unexpected type: %q", a.Type)
+	}
+	if a.Score != 15 {
+		t.Errorf("unexpected score: %d", a.Score)
+	}
+	if cfg.Routes[0].Authn.MinScore != 15 {
+		t.Errorf("unexpected min_score: %d", cfg.Routes[0].Authn.MinScore)
+	}
+	if len(cfg.Routes[0].Authn.Trust) != 1 || cfg.Routes[0].Authn.Trust[0] != "auth0-users" {
+		t.Errorf("unexpected trust: %v", cfg.Routes[0].Authn.Trust)
+	}
+}
+
+func TestLoad_TrustAnchorSPIFFEJWT(t *testing.T) {
+	yaml := `
+listeners:
+  - addr: ":8080"
+
+trust_anchors:
+  - id: spire-internal
+    type: spiffe_jwt
+    issuer: https://spire.internal
+    audience: https://api.internal
+    jwks_uri: https://spire.internal/keys
+    spiffe_trust_domain: example.com
+
+routes:
+  - id: r
+    match:
+      host: api.internal
+      path_prefix: /
+    upstream:
+      url: http://api:8080
+    authn:
+      required: true
+      trust: [spire-internal]
+`
+	cfg, err := config.LoadReader(strings.NewReader(yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	a := cfg.TrustAnchors[0]
+	if a.SpiffeTrustDomain != "example.com" {
+		t.Errorf("unexpected spiffe_trust_domain: %q", a.SpiffeTrustDomain)
+	}
+}
+
+func TestLoad_TrustAnchorRequiredButNotDefined_Rejected(t *testing.T) {
+	yaml := `
+listeners:
+  - addr: ":8080"
+
+routes:
+  - id: r
+    match:
+      host: h
+      path_prefix: /
+    upstream:
+      url: http://x:1
+    authn:
+      required: true
+      trust: [nonexistent-anchor]
+`
+	_, err := config.LoadReader(strings.NewReader(yaml))
+	if err == nil {
+		t.Error("expected error for undefined trust anchor reference")
+	}
+}
+
+func TestLoad_DuplicateTrustAnchorIDs_Rejected(t *testing.T) {
+	yaml := `
+listeners:
+  - addr: ":8080"
+
+trust_anchors:
+  - id: same
+    type: oidc
+    issuer: https://a.example.com
+    jwks_uri: https://a.example.com/jwks
+  - id: same
+    type: oidc
+    issuer: https://b.example.com
+    jwks_uri: https://b.example.com/jwks
+
+routes:
+  - id: r
+    match:
+      host: h
+      path_prefix: /
+    upstream:
+      url: http://x:1
+    authn:
+      required: false
+`
+	_, err := config.LoadReader(strings.NewReader(yaml))
+	if err == nil {
+		t.Error("expected error for duplicate trust anchor id")
+	}
+}
+
+func TestLoad_TrustAnchorOIDCMissingJWKSUri_Rejected(t *testing.T) {
+	yaml := `
+listeners:
+  - addr: ":8080"
+
+trust_anchors:
+  - id: bad-anchor
+    type: oidc
+    issuer: https://auth.example.com
+
+routes:
+  - id: r
+    match:
+      host: h
+      path_prefix: /
+    upstream:
+      url: http://x:1
+    authn:
+      required: false
+`
+	_, err := config.LoadReader(strings.NewReader(yaml))
+	if err == nil {
+		t.Error("expected error for oidc trust anchor missing jwks_uri")
+	}
+}
+
+func TestLoad_AuthnRequiredWithTrustAnchor_Valid(t *testing.T) {
+	// authn.required=true with trust anchors (no legacy issuers) should be valid.
+	yaml := `
+listeners:
+  - addr: ":8080"
+
+trust_anchors:
+  - id: my-idp
+    type: oidc
+    issuer: https://idp.example.com
+    jwks_uri: https://idp.example.com/jwks
+
+routes:
+  - id: r
+    match:
+      host: h
+      path_prefix: /
+    upstream:
+      url: http://x:1
+    authn:
+      required: true
+      trust: [my-idp]
+`
+	_, err := config.LoadReader(strings.NewReader(yaml))
+	if err != nil {
+		t.Errorf("unexpected error for valid trust anchor config: %v", err)
+	}
+}
