@@ -6,11 +6,16 @@ dist/
 # Test artifacts
 *.test
 *.out
-coverage.out
-coverage.html
+coverage.*
+*.coverprofile
+profile.cov
 
 # Generated certs (created by test helpers)
 testdata/certs/
+
+# Go workspace file
+go.work
+go.work.sum
 
 # Dependency vendoring (not used, but ignore if added)
 vendor/
@@ -31,3 +36,8 @@ vendor/
 # OS
 .DS_Store
 Thumbs.db
+
+# Windows binaries
+*.exe
+*.exe~
+*.dll
