@@ -1,0 +1,32 @@
+services:
+  bulwark:
+    image: ghcr.io/stormbane-security/bulwark:dev
+    command: ["serve", "--config", "/etc/bulwark/bulwark.yaml"]
+    ports:
+      - "8080:8080"
+    configs:
+      - source: bulwark-config
+        target: /etc/bulwark/bulwark.yaml
+    depends_on:
+      - testapi
+
+  testapi:
+    image: ghcr.io/stormbane-security/bulwark-testapi:dev
+    ports:
+      - "9090:9090"
+
+configs:
+  bulwark-config:
+    content: |
+      listeners:
+        - addr: ":8080"
+
+      routes:
+        - id: testapi
+          match:
+            host: api.local
+            path_prefix: /
+          upstream:
+            url: http://testapi:9090
+          authn:
+            required: false
