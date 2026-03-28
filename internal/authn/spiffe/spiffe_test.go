@@ -262,6 +262,76 @@ func TestValidator_BadSignature(t *testing.T) {
 	}
 }
 
+// ── not-before claim ──────────────────────────────────────────────────────────
+
+func TestValidator_NotYetValidToken(t *testing.T) {
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, "example.com")
+	raw := keys.mint(t, "spiffe://example.com/workload", func(b *jwt.Builder) {
+		b.NotBefore(time.Now().Add(time.Hour)) // valid only in 1 hour
+	})
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	_, err := v.Authenticate(req)
+	if err == nil {
+		t.Error("expected error for not-yet-valid token (nbf in future)")
+	}
+}
+
+// ── trust domain boundary ─────────────────────────────────────────────────────
+
+func TestValidator_TrustDomainBoundary_PrefixAttack(t *testing.T) {
+	// "example.com.evil" must NOT match trust domain "example.com".
+	// The "/" terminator in the prefix check prevents this.
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, "example.com")
+	raw := keys.mint(t, "spiffe://example.com.evil/workload")
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	_, err := v.Authenticate(req)
+	if err == nil {
+		t.Error("expected error: example.com.evil must not match trust domain example.com")
+	}
+}
+
+// ── JWKS server unreachable → fail closed ────────────────────────────────────
+
+func TestValidator_JWKSUnreachable_FailsClosed(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	keys := newTestKeys(t)
+	cache := jwk.NewCache(t.Context())
+	v, err := authnspiffe.New(testIssuer, testAudience, deadURL, "example.com", 25, cache)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := v.Register(); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	raw := keys.mint(t, "spiffe://example.com/workload")
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	_, err = v.Authenticate(req)
+	if err == nil {
+		t.Error("expected error when JWKS server is unreachable")
+	}
+	if err == authn.ErrNotApplicable {
+		t.Error("unreachable JWKS must fail closed (error), not return ErrNotApplicable")
+	}
+}
+
 // ── constructor validation ────────────────────────────────────────────────────
 
 func TestNew_MissingIssuerReturnsError(t *testing.T) {

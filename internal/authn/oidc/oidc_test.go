@@ -353,6 +353,93 @@ func TestValidator_JWKSCacheHit(t *testing.T) {
 
 // ── constructor validation ────────────────────────────────────────────────────
 
+// ── not-before claim ──────────────────────────────────────────────────────────
+
+func TestValidator_NotYetValidToken(t *testing.T) {
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, 15, "")
+	raw := keys.mint(t, func(b *jwt.Builder) {
+		b.NotBefore(time.Now().Add(time.Hour)) // valid only in 1 hour
+	})
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	_, err := v.Authenticate(req)
+	if err == nil {
+		t.Error("expected error for not-yet-valid token (nbf in future)")
+	}
+}
+
+// ── no audience configured ────────────────────────────────────────────────────
+
+func TestValidator_NoAudienceConfigured_AcceptsAnyAudience(t *testing.T) {
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	// Create validator with empty audience — no audience check should be performed.
+	cache := jwk.NewCache(t.Context())
+	v, err := authnoidc.New(testIssuer, "", srv.URL, 15, cache, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := v.Register(); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Mint a token with an arbitrary audience.
+	raw := keys.mint(t, func(b *jwt.Builder) {
+		b.Audience([]string{"https://some-other-api.internal"})
+	})
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	id, err := v.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error when no audience configured: %v", err)
+	}
+	if id == nil {
+		t.Fatal("expected identity")
+	}
+}
+
+// ── JWKS server unreachable → fail closed ─────────────────────────────────────
+
+func TestValidator_JWKSUnreachable_FailsClosed(t *testing.T) {
+	// Start a server, capture its URL, then close it immediately so it's unreachable.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	keys := newTestKeys(t)
+	cache := jwk.NewCache(t.Context())
+	v, err := authnoidc.New(testIssuer, testAudience, deadURL, 15, cache, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := v.Register(); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Mint a valid-looking token (won't matter — JWKS fetch will fail first).
+	raw := keys.mint(t)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	_, err = v.Authenticate(req)
+	if err == nil {
+		t.Error("expected error when JWKS server is unreachable")
+	}
+	if err == authn.ErrNotApplicable {
+		t.Error("unreachable JWKS must fail closed (error), not return ErrNotApplicable")
+	}
+}
+
+// ── constructor validation ────────────────────────────────────────────────────
+
 func TestNew_MissingIssuerReturnsError(t *testing.T) {
 	cache := jwk.NewCache(t.Context())
 	_, err := authnoidc.New("", testAudience, "https://auth.example.com/.well-known/jwks.json", 15, cache, "")
