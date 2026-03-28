@@ -173,6 +173,25 @@ func TestValidator_AnyTrustDomain_AcceptsAll(t *testing.T) {
 
 // ── non-SPIFFE subject → error ────────────────────────────────────────────────
 
+func TestValidator_EmptyBearerToken_HardFails(t *testing.T) {
+	// Same security property as OIDC: "Authorization: Bearer " must hard-fail,
+	// not silently pass through as anonymous on optional-auth routes.
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, "")
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	_, err := v.Authenticate(req)
+	if err == nil {
+		t.Error("expected error for empty Bearer token")
+	}
+	if err == authn.ErrNotApplicable {
+		t.Error("empty Bearer token must hard-fail, not return ErrNotApplicable")
+	}
+}
+
 func TestValidator_NonSPIFFESubject_HardFails(t *testing.T) {
 	keys := newTestKeys(t)
 	srv := newJWKSServer(t, keys.keySet)
@@ -207,6 +226,26 @@ func TestValidator_WrongTrustDomain_Rejected(t *testing.T) {
 	_, err := v.Authenticate(req)
 	if err == nil {
 		t.Error("expected error for wrong trust domain")
+	}
+}
+
+func TestValidator_TrustDomainTrailingSlash_FailsClosed(t *testing.T) {
+	// A misconfigured trust domain with a trailing slash (e.g. "example.com/")
+	// produces expected prefix "spiffe://example.com//" which no valid SPIFFE
+	// ID will match. This fails closed — all auth attempts are rejected.
+	// Documented here so the behavior is known and not mistaken for a security hole.
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, "example.com/") // trailing slash config mistake
+	raw := keys.mint(t, "spiffe://example.com/workload")
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	_, err := v.Authenticate(req)
+	if err == nil {
+		t.Error("trailing slash in trust domain should fail closed — no valid SPIFFE ID can match")
 	}
 }
 

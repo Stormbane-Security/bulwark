@@ -163,6 +163,9 @@ func validateTrustAnchor(i int, a *TrustAnchorConfig) error {
 	}
 	switch a.Type {
 	case "oidc", "spiffe_jwt":
+		if a.Issuer == "" {
+			return fmt.Errorf("config: trust_anchors[%d] %q: issuer is required for type %q", i, a.ID, a.Type)
+		}
 		if a.JWKSUri == "" {
 			return fmt.Errorf("config: trust_anchors[%d] %q: jwks_uri is required for type %q", i, a.ID, a.Type)
 		}

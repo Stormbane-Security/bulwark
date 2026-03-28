@@ -758,6 +758,58 @@ routes:
 	}
 }
 
+func TestLoad_TrustAnchorOIDCMissingIssuer_Rejected(t *testing.T) {
+	yaml := `
+listeners:
+  - addr: ":8080"
+
+trust_anchors:
+  - id: bad-anchor
+    type: oidc
+    jwks_uri: https://auth.example.com/.well-known/jwks.json
+
+routes:
+  - id: r
+    match:
+      host: h
+      path_prefix: /
+    upstream:
+      url: http://x:1
+    authn:
+      required: false
+`
+	_, err := config.LoadReader(strings.NewReader(yaml))
+	if err == nil {
+		t.Error("expected error for oidc trust anchor missing issuer")
+	}
+}
+
+func TestLoad_TrustAnchorSPIFFEJWTMissingIssuer_Rejected(t *testing.T) {
+	yaml := `
+listeners:
+  - addr: ":8080"
+
+trust_anchors:
+  - id: bad-spiffe
+    type: spiffe_jwt
+    jwks_uri: https://spire.example.com/keys
+
+routes:
+  - id: r
+    match:
+      host: h
+      path_prefix: /
+    upstream:
+      url: http://x:1
+    authn:
+      required: false
+`
+	_, err := config.LoadReader(strings.NewReader(yaml))
+	if err == nil {
+		t.Error("expected error for spiffe_jwt trust anchor missing issuer")
+	}
+}
+
 func TestLoad_AuthnRequiredWithTrustAnchor_Valid(t *testing.T) {
 	// authn.required=true with trust anchors (no legacy issuers) should be valid.
 	yaml := `

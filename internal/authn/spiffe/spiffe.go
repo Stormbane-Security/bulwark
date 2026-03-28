@@ -61,9 +61,12 @@ func (v *Validator) Register() error {
 // or if the subject is not a SPIFFE URI, or if it doesn't match the configured
 // trust domain.
 func (v *Validator) Authenticate(req *http.Request) (*identity.VerifiedIdentity, error) {
-	raw := bearerToken(req)
-	if raw == "" {
+	raw, hasBearer := bearerToken(req)
+	if !hasBearer {
 		return nil, authn.ErrNotApplicable
+	}
+	if raw == "" {
+		return nil, fmt.Errorf("spiffe: empty Bearer token")
 	}
 
 	keySet, err := v.cache.Get(req.Context(), v.jwksURI)
@@ -113,11 +116,15 @@ func (v *Validator) Authenticate(req *http.Request) (*identity.VerifiedIdentity,
 	}, nil
 }
 
-func bearerToken(r *http.Request) string {
+// bearerToken extracts the token value from a Bearer Authorization header.
+// Returns ("", false) if no Bearer header is present (ErrNotApplicable).
+// Returns ("", true) if the header is present but the token part is empty (hard 401).
+// Returns (token, true) for a non-empty token.
+func bearerToken(r *http.Request) (string, bool) {
 	const prefix = "Bearer "
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, prefix) {
-		return ""
+		return "", false
 	}
-	return strings.TrimPrefix(auth, prefix)
+	return strings.TrimPrefix(auth, prefix), true
 }

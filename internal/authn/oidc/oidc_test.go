@@ -292,6 +292,49 @@ func TestValidator_BadSignature(t *testing.T) {
 	}
 }
 
+func TestValidator_EmptyBearerToken_HardFails(t *testing.T) {
+	// "Authorization: Bearer " — the prefix is present but the token is empty.
+	// This must be a hard 401, not ErrNotApplicable; the client is trying to
+	// authenticate and failing, not absent. On optional-auth routes returning
+	// ErrNotApplicable would pass the request through as anonymous.
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, 15, "")
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	_, err := v.Authenticate(req)
+	if err == nil {
+		t.Error("expected error for empty Bearer token")
+	}
+	if err == authn.ErrNotApplicable {
+		t.Error("empty Bearer token must hard-fail, not return ErrNotApplicable")
+	}
+}
+
+func TestValidator_EmptySubjectClaim_HardFails(t *testing.T) {
+	keys := newTestKeys(t)
+	srv := newJWKSServer(t, keys.keySet)
+	defer srv.Close()
+
+	v := newValidator(t, srv.URL, 15, "")
+	raw := keys.mint(t, func(b *jwt.Builder) {
+		b.Subject("") // explicitly empty subject
+	})
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	_, err := v.Authenticate(req)
+	if err == nil {
+		t.Error("expected error for token with empty subject claim")
+	}
+	if err == authn.ErrNotApplicable {
+		t.Error("empty subject must hard-fail, not return ErrNotApplicable")
+	}
+}
+
 func TestValidator_MalformedToken(t *testing.T) {
 	keys := newTestKeys(t)
 	srv := newJWKSServer(t, keys.keySet)

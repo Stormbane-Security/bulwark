@@ -216,6 +216,100 @@ func TestMultiAuthn_MatchingSPIFFEPrincipalsMerged(t *testing.T) {
 	}
 }
 
+// ── empty authenticator list ──────────────────────────────────────────────────
+
+func TestMultiAuthn_NoAuthenticators_Required_Fails(t *testing.T) {
+	m := authn.NewMultiAuthn([]authn.Authenticator{}, true, 0)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	_, err := m.Authenticate(req)
+	if err == nil {
+		t.Error("expected error when required=true and no authenticators configured")
+	}
+}
+
+func TestMultiAuthn_NoAuthenticators_Optional_ReturnsNil(t *testing.T) {
+	m := authn.NewMultiAuthn([]authn.Authenticator{}, false, 0)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	id, err := m.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != nil {
+		t.Errorf("expected nil identity, got %+v", id)
+	}
+}
+
+// ── three-way merge ───────────────────────────────────────────────────────────
+
+func TestMultiAuthn_ThreeAuthenticators_SamePrincipal_MergesAll(t *testing.T) {
+	principal := "spiffe://example.com/svc"
+	m := authn.NewMultiAuthn([]authn.Authenticator{
+		&stubAuth{id: &identity.VerifiedIdentity{
+			Principal: principal, AssuranceScore: 30,
+			AuthMethods: []identity.AuthMethod{identity.AuthMTLSSPIFFE},
+			Evidence:    []identity.IdentityEvidence{{Type: identity.EvidenceMTLSCert, Score: 30}},
+		}},
+		&stubAuth{id: &identity.VerifiedIdentity{
+			Principal: principal, AssuranceScore: 25,
+			AuthMethods: []identity.AuthMethod{identity.AuthSPIFFEJWT},
+			Evidence:    []identity.IdentityEvidence{{Type: identity.EvidenceSPIFFEJWT, Score: 25}},
+		}},
+		&stubAuth{id: &identity.VerifiedIdentity{
+			Principal: principal, AssuranceScore: 15,
+			AuthMethods: []identity.AuthMethod{identity.AuthOIDC},
+			Evidence:    []identity.IdentityEvidence{{Type: identity.EvidenceJWT, Score: 15}},
+		}},
+	}, true, 0)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	id, err := m.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id.AssuranceScore != 70 {
+		t.Errorf("expected score 70 (30+25+15), got %d", id.AssuranceScore)
+	}
+	if len(id.AuthMethods) != 3 {
+		t.Errorf("expected 3 auth methods, got %d", len(id.AuthMethods))
+	}
+	if len(id.Evidence) != 3 {
+		t.Errorf("expected 3 evidence items, got %d", len(id.Evidence))
+	}
+}
+
+func TestMultiAuthn_ThirdAuthenticatorConflicts_Rejected(t *testing.T) {
+	principal := "spiffe://example.com/svc"
+	m := authn.NewMultiAuthn([]authn.Authenticator{
+		okAuth(principal, 30),
+		okAuth(principal, 25), // same principal — fine
+		okAuth("oidc:auth.example.com:different-user", 15), // conflicts
+	}, true, 0)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	_, err := m.Authenticate(req)
+	if err == nil {
+		t.Error("expected error when third authenticator has a conflicting principal")
+	}
+}
+
+// ── min_score = 0 ─────────────────────────────────────────────────────────────
+
+func TestMultiAuthn_MinScoreZero_AnyScorePasses(t *testing.T) {
+	// minScore=0 means "no minimum" — even a score of 1 should pass.
+	m := authn.NewMultiAuthn([]authn.Authenticator{
+		okAuth("oidc:auth.example.com:svc", 1),
+	}, true, 0)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/", nil)
+	id, err := m.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id.AssuranceScore != 1 {
+		t.Errorf("expected score 1, got %d", id.AssuranceScore)
+	}
+}
+
 // ── NoopEnricher ──────────────────────────────────────────────────────────────
 
 func TestNoopEnricher_PassesThrough(t *testing.T) {

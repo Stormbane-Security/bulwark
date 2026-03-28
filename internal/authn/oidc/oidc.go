@@ -56,10 +56,18 @@ func (v *Validator) Register() error {
 // Authenticate validates the Bearer JWT in the Authorization header.
 // Returns ErrNotApplicable if no Bearer token is present.
 // Returns a non-nil error (causing 401) if the token is present but invalid.
+// Authenticate validates the Bearer JWT in the Authorization header.
+// Returns ErrNotApplicable if no Bearer token is present.
+// Returns a non-nil error (causing 401) if the token is present but invalid.
 func (v *Validator) Authenticate(req *http.Request) (*identity.VerifiedIdentity, error) {
-	raw := bearerToken(req)
-	if raw == "" {
+	raw, hasBearer := bearerToken(req)
+	if !hasBearer {
 		return nil, authn.ErrNotApplicable
+	}
+	// "Authorization: Bearer " with an empty token — credentials were presented
+	// but are malformed. Must hard-fail; never silently degrade to anonymous.
+	if raw == "" {
+		return nil, fmt.Errorf("oidc: empty Bearer token")
 	}
 
 	keySet, err := v.cache.Get(req.Context(), v.jwksURI)
@@ -82,6 +90,9 @@ func (v *Validator) Authenticate(req *http.Request) (*identity.VerifiedIdentity,
 	}
 
 	sub := token.Subject()
+	if sub == "" {
+		return nil, fmt.Errorf("oidc: token has empty subject claim")
+	}
 	return &identity.VerifiedIdentity{
 		Principal:      v.normalizePrincipal(sub),
 		Issuer:         v.issuer,
@@ -111,11 +122,15 @@ func (v *Validator) normalizePrincipal(sub string) string {
 	return "oidc:" + issuerHost + ":" + sub
 }
 
-func bearerToken(r *http.Request) string {
+// bearerToken extracts the token value from a Bearer Authorization header.
+// Returns ("", false) if no Bearer header is present (ErrNotApplicable).
+// Returns ("", true) if the header is present but the token part is empty (hard 401).
+// Returns (token, true) for a non-empty token.
+func bearerToken(r *http.Request) (string, bool) {
 	const prefix = "Bearer "
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, prefix) {
-		return ""
+		return "", false
 	}
-	return strings.TrimPrefix(auth, prefix)
+	return strings.TrimPrefix(auth, prefix), true
 }
