@@ -17,7 +17,7 @@ func TestJSONAuditLogger_EmitsValidJSON(t *testing.T) {
 	var buf bytes.Buffer
 	logger := audit.NewJSONLogger(&buf)
 
-	req := httptest.NewRequest(http.MethodGet, "http://api.internal/orders", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/orders", nil)
 	req.RemoteAddr = "10.0.0.1:12345"
 
 	event := audit.Event{

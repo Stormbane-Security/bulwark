@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -29,8 +30,13 @@ func main() {
 	mux.HandleFunc("/wallet", makeHandler("/wallet",
 		"requires eth: principal (wallet-aware OIDC via Web3Auth/Privy)"))
 
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second,
+	}
 	fmt.Fprintf(os.Stderr, "testapi listening on %s\n", *addr)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

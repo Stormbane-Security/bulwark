@@ -62,7 +62,7 @@ func TestHandler_404OnNoRouteMatch(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://other.internal/orders", nil)
+	req := httptest.NewRequestWithContext(t.Context(),http.MethodGet, "http://other.internal/orders", nil)
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
@@ -88,7 +88,7 @@ func TestHandler_MatchByHostAndPath(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://api.internal/orders", nil)
+	req := httptest.NewRequestWithContext(t.Context(),http.MethodGet, "http://api.internal/orders", nil)
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -135,7 +135,7 @@ func TestHandler_LongestPathPrefixWins(t *testing.T) {
 	}
 	for _, tc := range tests {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "http://api.internal"+tc.path, nil)
+		req := httptest.NewRequestWithContext(t.Context(),http.MethodGet, "http://api.internal"+tc.path, nil)
 		h.ServeHTTP(rec, req)
 		body, _ := io.ReadAll(rec.Body)
 		if string(body) != tc.wantBody {
@@ -162,7 +162,7 @@ func TestHandler_HostMismatchIs404(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://other.internal/", nil)
+	req := httptest.NewRequestWithContext(t.Context(),http.MethodGet, "http://other.internal/", nil)
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
@@ -190,7 +190,7 @@ func TestHandler_StripsBulwarkHeadersFromUpstream(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://api.internal/", nil)
+	req := httptest.NewRequestWithContext(t.Context(),http.MethodGet, "http://api.internal/", nil)
 	req.Header.Set("X-Bulwark-Subject", "attacker")
 	req.Header.Set("X-Bulwark-Groups", "admins")
 	req.Header.Set("X-Bulwark-Custom", "injected")
@@ -224,7 +224,7 @@ func TestHandler_PreservesNonBulwarkHeaders(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://api.internal/", nil)
+	req := httptest.NewRequestWithContext(t.Context(),http.MethodGet, "http://api.internal/", nil)
 	req.Header.Set("Authorization", "Bearer token")
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rec, req)
@@ -261,7 +261,7 @@ func TestHandler_502OnUnreachableUpstream(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://api.internal/", nil)
+	req := httptest.NewRequestWithContext(t.Context(),http.MethodGet, "http://api.internal/", nil)
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadGateway {
@@ -287,7 +287,7 @@ func TestHandler_UpstreamErrorStatusProxied(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://api.internal/", nil)
+	req := httptest.NewRequestWithContext(t.Context(),http.MethodGet, "http://api.internal/", nil)
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusInternalServerError {
@@ -318,7 +318,7 @@ func TestHandler_AuditEventEmitted(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://api.internal/orders", nil)
+	req := httptest.NewRequestWithContext(t.Context(),http.MethodGet, "http://api.internal/orders", nil)
 	req.RemoteAddr = "10.0.0.1:12345"
 	h.ServeHTTP(rec, req)
 
@@ -367,7 +367,7 @@ func TestHandler_AuditEventOn404(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://no-match.internal/", nil)
+	req := httptest.NewRequestWithContext(t.Context(),http.MethodGet, "http://no-match.internal/", nil)
 	h.ServeHTTP(rec, req)
 
 	if len(captured) != 1 {

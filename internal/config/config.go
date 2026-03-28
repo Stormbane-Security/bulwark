@@ -89,12 +89,17 @@ type PolicyConfig struct {
 }
 
 // Load reads and validates a Bulwark config from a file path.
-func Load(path string) (*Config, error) {
+func Load(path string) (_ *Config, err error) {
+	//nolint:gosec // path is the operator-supplied --config flag; reading it is intentional (G304)
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening config: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("closing config: %w", cerr)
+		}
+	}()
 	return LoadReader(f)
 }
 

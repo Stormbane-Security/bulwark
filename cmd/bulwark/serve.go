@@ -57,12 +57,13 @@ func serve(cfg *config.Config) error {
 	}
 
 	srv := &http.Server{
-		Addr:    l.Addr,
-		Handler: handler,
+		Addr:              l.Addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 
 	// Bind the listener early so we fail fast on address conflicts.
-	ln, err := net.Listen("tcp", l.Addr)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", l.Addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", l.Addr, err)
 	}
